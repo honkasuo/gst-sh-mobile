@@ -1,0 +1,26 @@
+2009-04-09  Pablo Virolainen <pablo.virolainen@nomovok.com>
+
+    * Initial release
+
+2009-05-22  Aki Honkasuo  <aki.honkasuo@nomovok.com>
+
+    * MPEG4 input problem fixed
+    * Output properties read now from framebuffer
+    * GStreamer event handling improved
+    * Added initial version of scheduling
+
+2009-06-04  Aki Honkasuo  <aki.honkasuo@nomovok.com>
+
+    * Blocking bug fixed in buffer handling
+    * Works now with more than one video sample
+    * Some code cleaning
+
+2009-06-17  Aki Honkasuo  <aki.honkasuo@nomovok.com>
+
+    * Zero-Copy implemented for the video screen playback
+    * m4iph_hwadd_sdr_mem implementation added
+    * MPEG-4 videos are now with lip sync after zero-copy implementation
+    * MPEG-4 and H.264 encoder works and tested with raw files and a webcam
+    * Code clean-ups and the headers commented in Doxygen style
+    * configure.ac updated
+    * H.264 playback is still bad due the frame drops

@@ -1,0 +1,34 @@
+gst-sh-mobile (1.0-0rc1) unstable; urgency=low
+
+  * Zero-Copy implemented for the video screen playback
+  * m4iph_hwadd_sdr_mem implementation added
+  * MPEG-4 videos are now with lip sync after zero-copy implementation
+  * MPEG-4 and H.264 encoder works and tested with raw files and a webcam
+  * Code clean-ups and the headers commented in Doxygen style
+  * configure.ac updated
+  * H.264 playback is still bad due the frame drops
+
+ -- Aki Honkasuo <aki.honkasuo@nomovok.com>  Wed, 17 Jun 2009 19:22:12 +0300
+
+gst-sh-mobile (0.3) unstable; urgency=low
+
+  * Blocking bug fixed in buffer handling
+  * Works now with more than one video sample
+  * Some code cleaning
+
+ -- Aki Honkasuo <aki.honkasuo@nomovok.com>  Thu, 04 Jun 2009 13:29:58 +0300
+
+gst-sh-mobile (0.2) unstable; urgency=low
+
+  * MPEG4 input problem fixed
+  * Output properties read now from framebuffer
+  * GStreamer event handling improved
+  * Added initial version of scheduling
+
+ -- Aki Honkasuo <aki.honkasuo@nomovok.com>  Fri, 22 May 2009 17:39:47 +0300
+
+gst-sh-mobile (0.1-1) unstable; urgency=low
+
+  * Initial release (Closes: #nnnn)  <nnnn is the bug number of your ITP>
+
+ -- Pablo Virolainen <pablo@unknown>  Thu, 09 Apr 2009 10:31:17 +0300
