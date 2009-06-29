@@ -33,14 +33,11 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "gstshvideodec.h"
 #include <linux/fb.h>
 #include "vidix/sh_veu_vid.c"
-
-#ifdef HAVE_M4IPH_HWADD_SDR_MEM
-#include <m4driverif.h>
-#endif
 
 /**
  * Define capatibilities for the sink factory
@@ -102,6 +99,20 @@ vidix_playback_t sh_vidix;
 
 GST_DEBUG_CATEGORY_STATIC (gst_sh_mobile_debug);
 #define GST_CAT_DEFAULT gst_sh_mobile_debug
+
+#define DEFAULT_MAX_SIZE 0
+
+/**
+ * Define decoder properties
+ */
+
+enum
+{
+  PROP_0,
+  PROP_MAX_BUFFER_SIZE,
+  PROP_LAST
+};
+
 
 static void
 gst_shvideodec_init_class (gpointer g_class, gpointer data)
@@ -182,6 +193,17 @@ gst_shvideodec_class_init (GstshvideodecClass * klass)
       0, "Decoder and player for H264/MPEG4 streams");
 
   gobject_class->dispose = gst_shvideodec_dispose;
+  gobject_class->set_property = gst_shvideodec_set_property;
+  gobject_class->get_property = gst_shvideodec_get_property;
+
+  g_object_class_install_property (gobject_class, PROP_MAX_BUFFER_SIZE,
+      g_param_spec_uint ("buffer-size", "Maximum buffer size kB", 
+			"Maximum size of the experimental pre-buffer (kB, 0=disabled)", 
+                           0, G_MAXUINT, DEFAULT_MAX_SIZE,
+			   G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  gstelement_class->change_state = gst_shvideodec_change_state;
+  gstelement_class->set_clock = gst_shvideodec_set_clock;
 }
 
 static void
@@ -204,7 +226,116 @@ gst_shvideodec_init (Gstshvideodec * dec, GstshvideodecClass * gklass)
   dec->caps_set = FALSE;
   dec->decoder = NULL;
   dec->waiting_for_first_frame = TRUE;
-  dec->clock = gst_system_clock_obtain();
+
+  dec->buffer = NULL;
+  dec->buffer_size = DEFAULT_MAX_SIZE;
+
+  dec->running = TRUE;  
+  dec->paused = TRUE;
+
+  pthread_mutex_init(&dec->mutex,NULL);
+  pthread_mutex_init(&dec->cond_mutex,NULL);
+  pthread_cond_init(&dec->thread_condition,NULL);
+  pthread_mutex_init(&dec->pause_mutex,NULL);
+  pthread_cond_init(&dec->pause_condition,NULL);
+}
+
+
+static void
+gst_shvideodec_set_property (GObject * object, guint prop_id,
+    const GValue * value, GParamSpec * pspec)
+{
+  Gstshvideodec *dec = GST_SHVIDEODEC (object);
+  
+  switch (prop_id) 
+  {
+    case PROP_MAX_BUFFER_SIZE:
+    {
+      dec->buffer_size = g_value_get_uint (value) * 1024; // Kilobytes we use
+      break;
+    }
+    default:
+    {
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+    }
+  }
+}
+
+static void
+gst_shvideodec_get_property (GObject * object, guint prop_id,
+    GValue * value, GParamSpec * pspec)
+{
+  Gstshvideodec *dec = GST_SHVIDEODEC (object);
+
+  switch (prop_id) 
+  {
+    case PROP_MAX_BUFFER_SIZE:
+    {
+      g_value_set_uint(value,dec->buffer_size/1024); // In kilo bytes      
+      break;
+    }
+  default:
+    G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+  }
+}
+
+static gboolean            
+gst_shvideodec_set_clock (GstElement *element, GstClock *clock)
+{
+  Gstshvideodec *dec = (Gstshvideodec *) element;
+  
+  GST_DEBUG_OBJECT(dec,"%s called",__FUNCTION__);
+
+  if(!clock)
+  {
+    GST_DEBUG_OBJECT(dec,"Using system clock");
+    dec->clock = gst_system_clock_obtain();
+    return FALSE;
+  }
+  else
+  {
+    GST_DEBUG_OBJECT(dec,"Clock accepted");
+    dec->clock = clock;
+    return TRUE;
+  }
+}
+
+static GstStateChangeReturn
+gst_shvideodec_change_state (GstElement *element, GstStateChange transition)
+{
+  GstStateChangeReturn ret = GST_STATE_CHANGE_SUCCESS;
+  Gstshvideodec *dec = (Gstshvideodec *) element;
+  
+  GST_DEBUG_OBJECT(dec,"%s called",__FUNCTION__);
+
+  switch (transition) 
+  {
+    case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
+    {
+      GST_DEBUG_OBJECT(dec,"Resume playing");
+      dec->paused = FALSE;
+      pthread_mutex_lock( &dec->pause_mutex );
+      pthread_cond_signal( &dec->pause_condition);
+      pthread_mutex_unlock( &dec->pause_mutex );
+      break;
+    }
+    case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
+    {
+      GST_DEBUG_OBJECT(dec,"Pause playing");
+      dec->paused = TRUE;
+      break;
+    }
+    default:
+    {
+      ret = GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
+      if (ret == GST_STATE_CHANGE_FAILURE)
+        return ret;
+      break;
+    }
+  }
+
+  return ret;
 }
 
 static gboolean
@@ -220,7 +351,17 @@ gst_shvideodec_sink_event (GstPad * pad, GstEvent * event)
     case GST_EVENT_EOS:
     {
       GST_DEBUG_OBJECT (dec, "EOS gst event");
-      // We don't have buffering so just inform application about EOS
+      dec->running = FALSE;
+      if(dec->dec_thread)
+      {
+        pthread_join(dec->dec_thread,NULL);
+        // Decode the rest of the buffer
+      }
+      else
+      {
+        gst_element_post_message((GstElement*)dec,gst_message_new_buffering((GstObject*)dec,100));      
+      }
+      gst_shvideodec_decode(dec);
       gst_element_post_message((GstElement*)dec,gst_message_new_eos((GstObject*)dec));
       break;
     }
@@ -273,6 +414,14 @@ gst_shvideodec_setcaps (GstPad * pad, GstCaps * caps)
     }
   }
 
+  if(!gst_structure_get_fraction (structure, "framerate", 
+				  &dec->fps_numerator, 
+				  &dec->fps_denominator))
+  {
+    GST_DEBUG_OBJECT(dec,"%s failed (no framerate)",__FUNCTION__);
+    return FALSE;
+  }
+
   if (gst_structure_get_int (structure, "width",  &dec->width)
       && gst_structure_get_int (structure, "height", &dec->height)) 
   {
@@ -294,6 +443,9 @@ gst_shvideodec_setcaps (GstPad * pad, GstCaps * caps)
 
   /* Set frame by frame */
   shcodecs_decoder_set_frame_by_frame(dec->decoder,1);
+
+  /* Use physical addresses for playback */
+  shcodecs_decoder_set_use_physical(dec->decoder,1);
 
   /* Let's try to init video output. First we probe, then init */  
   if (sh_veu_probe(0,0)<0) 
@@ -359,6 +511,7 @@ gst_shvideodec_chain (GstPad * pad, GstBuffer * inbuffer)
 {
   Gstshvideodec *dec = (Gstshvideodec *) (GST_OBJECT_PARENT (pad));
   GstFlowReturn ret = GST_FLOW_OK;
+  gint percent;
 
   if(!dec->caps_set)
   {
@@ -368,47 +521,135 @@ gst_shvideodec_chain (GstPad * pad, GstBuffer * inbuffer)
 
   GST_LOG_OBJECT(dec,"%s called",__FUNCTION__);
 
-  dec->current_timestamp = GST_BUFFER_TIMESTAMP (inbuffer);
-  GST_LOG_OBJECT(dec,"timestamp: %llu duration: %llu",
-    GST_TIME_AS_MSECONDS(dec->current_timestamp),
-    GST_TIME_AS_MSECONDS(GST_BUFFER_DURATION (inbuffer)));
+  
+  if(dec->buffer &&
+     GST_BUFFER_SIZE(dec->buffer) + GST_BUFFER_SIZE(inbuffer) > dec->buffer_size)
+  {
+    if(!dec->dec_thread)
+    {
+      GST_DEBUG_OBJECT(dec,"Pre-buffering complete. The new frame doesn't fit");    
+      gst_element_post_message((GstElement*)dec,gst_message_new_buffering((GstObject*)dec,100));      
+      /* We'll have to launch the decoder in 
+         a separate thread to keep the pipeline running */
+      pthread_create( &dec->dec_thread, NULL, gst_shvideodec_decode, dec);
+    }
+    else
+    {
+      GST_DEBUG_OBJECT(dec,"Buffer full, waiting");    
+      pthread_mutex_lock( &dec->cond_mutex );
+      pthread_cond_wait( &dec->thread_condition, &dec->cond_mutex );
+      pthread_mutex_unlock( &dec->cond_mutex );
+      GST_DEBUG_OBJECT(dec,"Got signal");
+    }    
+  }
 
-  ret = gst_shvideodec_decode (dec, inbuffer);
+  pthread_mutex_lock( &dec->mutex );
+  if(!dec->buffer)
+  {
+    GST_DEBUG_OBJECT(dec,"First frame in buffer. Size %d timestamp: %llu duration: %llu",
+		   GST_BUFFER_SIZE(inbuffer),
+		   GST_TIME_AS_MSECONDS(GST_BUFFER_TIMESTAMP (inbuffer)),
+		   GST_TIME_AS_MSECONDS(GST_BUFFER_DURATION (inbuffer)));
 
-  gst_buffer_unref (inbuffer);
+    dec->buffer_timestamp = GST_BUFFER_TIMESTAMP (inbuffer);
+    dec->buffer_frames = 1;
+    dec->buffer = inbuffer;
+  }  
+  else
+  {
+    GST_LOG_OBJECT(dec,"Buffer size %d timestamp: %llu duration: %llu",
+		   GST_BUFFER_SIZE(inbuffer),
+		   GST_TIME_AS_MSECONDS(GST_BUFFER_TIMESTAMP (inbuffer)),
+		   GST_TIME_AS_MSECONDS(GST_BUFFER_DURATION (inbuffer)));
+
+    dec->buffer = gst_buffer_join(dec->buffer,inbuffer);
+    dec->buffer_frames++;
+    GST_LOG_OBJECT(dec,"Buffer added. Now storing %d bytes",GST_BUFFER_SIZE(dec->buffer));        
+  }
+  pthread_mutex_unlock( &dec->mutex );
+
+  if(!dec->dec_thread)
+  {
+    if(!dec->buffer_size || (GST_BUFFER_SIZE(dec->buffer) >= dec->buffer_size))
+    {
+      GST_DEBUG_OBJECT(dec,"Pre-buffering complete");    
+      // Let's start decoding as soon as possible
+      pthread_create( &dec->dec_thread, NULL, gst_shvideodec_decode, dec);
+    } 
+    else
+    {
+      //Send buffering message.
+      percent = GST_BUFFER_SIZE(dec->buffer) * 100 / dec->buffer_size;
+      GST_LOG_OBJECT(dec,"Pre-buffering %d",percent);    
+      gst_element_post_message((GstElement*)dec,gst_message_new_buffering((GstObject*)dec,percent));      
+    }
+  }
+
+  // If the decoder was waiting for data.
+  pthread_mutex_lock( &dec->cond_mutex );
+  pthread_cond_signal( &dec->thread_condition);
+  pthread_mutex_unlock( &dec->cond_mutex );
 
   return ret;
 }
 
-static GstFlowReturn
-gst_shvideodec_decode (Gstshvideodec * dec, 
-		       GstBuffer     * inbuffer)
+void *
+gst_shvideodec_decode (void *data)
 {
   int used_bytes;
+  GstBuffer* buffer;
 
-  if (inbuffer==NULL) 
+  Gstshvideodec *dec = (Gstshvideodec *)data;
+
+  GST_LOG_OBJECT(dec,"%s called\n",__FUNCTION__);
+
+  do
   {
-    GST_DEBUG_OBJECT(dec,"%s called with null inbuffer",__FUNCTION__);
-  }
-  else
-  {
-    GST_LOG_OBJECT(dec,"%s called\n",__FUNCTION__);
-  }
+    if(!dec->buffer)
+    {
+      GST_DEBUG_OBJECT(dec,"Waiting for data.");        
+      pthread_mutex_lock( &dec->cond_mutex );
+      pthread_cond_wait( &dec->thread_condition, &dec->cond_mutex );
+      pthread_mutex_unlock( &dec->cond_mutex );
+      GST_DEBUG_OBJECT(dec,"Got signal");        
+    }
 
-#ifndef HAVE_M4IPH_HWADD_SDR_MEM
-  // Store output addresses
-  dec->y_addr = read_reg(&vpu_mmio,VPDYR);
-  dec->c_addr = read_reg(&vpu_mmio,VPDCR);
-#endif
-  used_bytes = shcodecs_decode(dec->decoder,
-		  GST_BUFFER_DATA (inbuffer),
-		  GST_BUFFER_SIZE (inbuffer));
+    pthread_mutex_lock(&dec->mutex);
+    buffer = dec->buffer;
+    dec->buffer = NULL; 
+    dec->playback_timestamp = dec->buffer_timestamp;
+    dec->playback_frames = dec->buffer_frames;
+    pthread_mutex_unlock(&dec->mutex); 
 
-  GST_LOG_OBJECT(dec,"Input buffer size: %d used: %d decoded %d frames",
-   GST_BUFFER_SIZE (inbuffer),used_bytes,
-   shcodecs_decoder_get_frame_count(dec->decoder));
+    // If the other thread was waiting for buffer to be consumed
+    pthread_mutex_lock( &dec->cond_mutex );
+    pthread_cond_signal( &dec->thread_condition);
+    pthread_mutex_unlock( &dec->cond_mutex );
 
-  return GST_FLOW_OK;
+    GST_DEBUG_OBJECT(dec,"Input buffer size: %d frames %d",
+		   GST_BUFFER_SIZE (buffer), dec->playback_frames);
+
+    dec->playback_played = 0;
+
+    used_bytes = shcodecs_decode(dec->decoder,
+		    GST_BUFFER_DATA (buffer),
+		    GST_BUFFER_SIZE (buffer));
+
+    GST_DEBUG_OBJECT(dec,"Used: %d decoded, %d frames, total %d frames",
+		   used_bytes, dec->playback_played, shcodecs_decoder_get_frame_count(dec->decoder));
+
+    if(GST_BUFFER_SIZE(buffer) != used_bytes)
+    {    
+      GST_DEBUG_OBJECT(dec,"Skipped %d frames and %d bytes of data",
+		       dec->playback_frames-dec->playback_played,
+		       GST_BUFFER_SIZE(buffer)-used_bytes);
+    }
+
+    gst_buffer_unref(buffer);
+    buffer = NULL;    
+  }while(dec->running);
+
+  return NULL;
 }
 
 static int
@@ -419,29 +660,32 @@ gst_shcodecs_decoded_callback (SHCodecs_Decoder * decoder,
 {
   GstClockTime time_now;
   long long unsigned int time_diff, stamp_diff, sleep_time;
-  static int frame_number = 1;
   Gstshvideodec *dec = (Gstshvideodec *) user_data;
 
+  if(dec->paused)
+  {
+    pthread_mutex_lock( &dec->pause_mutex );
+    pthread_cond_wait( &dec->pause_condition, &dec->pause_mutex );
+    pthread_mutex_unlock( &dec->pause_mutex );
+  }
+
   // Zero copy: Set the playback address to VPU mem  
-#ifndef HAVE_M4IPH_HWADD_SDR_MEM
-  sh_vidix.offset.y=dec->y_addr;
-  sh_vidix.offset.u=dec->c_addr;
-#else
-  sh_vidix.offset.y=(unsigned)m4iph_hwadd_sdr_mem(y_buf);
-  sh_vidix.offset.u=(unsigned)m4iph_hwadd_sdr_mem(c_buf);
-#endif
+  sh_vidix.offset.y=(unsigned)y_buf;
+  sh_vidix.offset.u=(unsigned)c_buf;
 
   if (dec->waiting_for_first_frame)
   { 
     dec->start_time = gst_clock_get_time(dec->clock);
-    dec->first_timestamp = dec->current_timestamp;
+    dec->first_timestamp = dec->playback_timestamp;
     dec->waiting_for_first_frame = FALSE;
   }
 
   time_now = gst_clock_get_time(dec->clock);
   time_diff = GST_TIME_AS_MSECONDS(GST_CLOCK_DIFF(dec->start_time,time_now)); 
   stamp_diff = 
-    GST_TIME_AS_MSECONDS(dec->current_timestamp) - GST_TIME_AS_MSECONDS(dec->first_timestamp);
+    GST_TIME_AS_MSECONDS(dec->playback_timestamp)
+    + ( dec->playback_played * ( 1000 * dec->fps_denominator / dec->fps_numerator ) )
+    - GST_TIME_AS_MSECONDS(dec->first_timestamp);
 
   if(stamp_diff > time_diff)
   {
@@ -452,11 +696,28 @@ gst_shcodecs_decoded_callback (SHCodecs_Decoder * decoder,
     sleep_time = 0;
   }
 
-  GST_LOG_OBJECT(dec,"Frame number: %d time from start: %llu stamp diff: %llu",frame_number,time_diff,stamp_diff);
+  if(!dec->playback_played)
+  {
+    GST_DEBUG_OBJECT(dec,"Frame number: %d time from start: %llu stamp diff: %llu",
+		   dec->playback_played,time_diff,stamp_diff);
+  }
+  else
+  {
+    GST_LOG_OBJECT(dec,"Frame number: %d time from start: %llu stamp diff: %llu",
+		   dec->playback_played,time_diff,stamp_diff);
+  }
+ 
 
   if(sleep_time)
   {
-    GST_LOG_OBJECT(dec,"sleeping for: %llums",sleep_time);
+    if(!dec->playback_played)
+    {    
+      GST_DEBUG_OBJECT(dec,"sleeping for: %llums",sleep_time);
+    }
+    else
+    {    
+      GST_LOG_OBJECT(dec,"sleeping for: %llums",sleep_time);
+    }
     usleep(sleep_time*1000);
   }  
 
@@ -464,7 +725,7 @@ gst_shcodecs_decoded_callback (SHCodecs_Decoder * decoder,
   sh_veu_blit(&sh_vidix, 0);
   sh_veu_wait_irq(&sh_vidix);
 
-  frame_number++;
+  dec->playback_played++;
   return 1;
 }
 

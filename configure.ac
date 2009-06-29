@@ -132,7 +132,7 @@ fi
 AC_SUBST(LIBSHCODECS_CFLAGS)
 AC_SUBST(LIBSHCODECS_LIBS)
 
-AC_CHECK_LIB(shcodecs,m4iph_hwadd_sdr_mem, AC_DEFINE([HAVE_M4IPH_HWADD_SDR_MEM], [1], [need read from register hack?]),,"-lstdc++")
+AC_CHECK_LIB(shcodecs,shcodecs_decoder_set_use_physical,,AC_ERROR,"-lstdc++")
 
 dnl *** set variables based on configure arguments ***
 

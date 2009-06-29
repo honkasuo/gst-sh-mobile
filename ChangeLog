@@ -24,3 +24,10 @@
     * Code clean-ups and the headers commented in Doxygen style
     * configure.ac updated
     * H.264 playback is still bad due the frame drops
+
+2009-06-24  Aki Honkasuo  <aki.honkasuo@nomovok.com>
+
+   * Implementation for stream input buffering
+   * With large buffer size the video playback quality is much better
+   * Large video buffer size will increase lag of the audio play back
+

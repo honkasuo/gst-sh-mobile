@@ -64,6 +64,8 @@ struct _Gstshvideodec
   SHCodecs_Format format;
   gint width;
   gint height;
+  gint fps_numerator;
+  gint fps_denominator;
   SHCodecs_Decoder * decoder;
 
   /* Needed? */  
@@ -77,15 +79,29 @@ struct _Gstshvideodec
   gint dst_x;
   gint dst_y;
 
-#ifndef HAVE_M4IPH_HWADD_SDR_MEM
-  gulong y_addr;
-  gulong c_addr;
-#endif
+  GstBuffer* buffer;
+  guint32 buffer_size;
+  GstClockTime buffer_timestamp;
+  gint buffer_frames;
+
+  gboolean running;
+  gboolean paused;
+
+  GstClockTime playback_timestamp;
+  gint playback_frames;  
+  gint playback_played;
 
   GstClock* clock;
   GstClockTime first_timestamp;
   GstClockTime current_timestamp;
   GstClockTime start_time;
+
+  pthread_t dec_thread;
+  pthread_mutex_t mutex;
+  pthread_mutex_t cond_mutex;
+  pthread_cond_t  thread_condition;
+  pthread_mutex_t pause_mutex;
+  pthread_cond_t  pause_condition;
 };
 
 /**
@@ -136,6 +152,46 @@ static void gst_shvideodec_class_init (GstshvideodecClass * klass);
 
 static void gst_shvideodec_init (Gstshvideodec * dec, GstshvideodecClass * gklass);
 
+
+/** The function will set the user defined maximum buffer size value for decoder
+    @param object The object where to get Gstreamer SH video Decoder object
+    @param prop_id The property id
+    @param value In this case maximum buffer size in kilo bytes
+    @param pspec not used in fuction
+*/
+
+static void gst_shvideodec_set_property (GObject *object, 
+					  guint prop_id, const GValue *value, 
+					  GParamSpec * pspec);
+
+/** The function will return the maximum buffer size in kilo bytes from decoder to value
+    @param object The object where to get Gstreamer SH video Decoder object
+    @param prop_id The property id
+    @param value In this case maximum buffer size in kilo bytes
+    @param pspec not used in fuction
+*/
+
+static void gst_shvideodec_get_property (GObject * object, guint prop_id,
+					  GValue * value, GParamSpec * pspec);
+
+/** Sets the clock for the element
+    @param element GStreamer element
+    @param clock the used clock. If NULL we use system clock
+    @return Returns true if clock was accepted
+*/
+static gboolean            
+gst_shvideodec_set_clock (GstElement *element, GstClock *clock);
+
+/** Handler for element state changes
+    @param element GStreamer element
+    @param transition From which state we change wo which
+    @return Returns GST_STATE_CHANGE_SUCCESS if ok. 
+            Otherwise GST_STATE_CHANGE_FAILURE
+*/
+static GstStateChangeReturn gst_shvideodec_change_state (GstElement *element, 
+							 GstStateChange transition);
+
+
 /** Event handler for decoder sink events
     @param pad Gstreamer sink pad
     @param event The Gstreamer event
@@ -161,12 +217,10 @@ static gboolean gst_shvideodec_setcaps (GstPad * pad, GstCaps * caps);
 static GstFlowReturn gst_shvideodec_chain (GstPad * pad, GstBuffer * inbuffer);
 
 /** The video input buffer decode function
-    @param dec Gstreamer SH video element
-    @param inbuffer The input buffer
-    @return The result of passing data to a pad
+    @param data decoder object
 */
 
-static GstFlowReturn gst_shvideodec_decode (Gstshvideodec * dec, GstBuffer * inbuffer);
+void* gst_shvideodec_decode (void *data);
 
 /** Initialize the decoder sink
     @param plugin Gstreamer plugin
@@ -189,5 +243,6 @@ static int gst_shcodecs_decoded_callback (SHCodecs_Decoder * decoder,
 	     unsigned char * y_buf, int y_size,
 	     unsigned char * c_buf, int c_size,
 	     void * user_data);
+
 G_END_DECLS
 #endif

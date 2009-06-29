@@ -1,3 +1,11 @@
+gst-sh-mobile (1.0-0rc2) unstable; urgency=low
+
+  * Implementation for stream input buffering
+  * With large buffer size the video playback quality is much better
+  * Large video buffer size will increase lag of the audio play back
+
+ -- Aki Honkasuo <aki.honkasuo@nomovok.com>  Wed, 24 Jun 2009 18:33:12 +0300
+
 gst-sh-mobile (1.0-0rc1) unstable; urgency=low
 
   * Zero-Copy implemented for the video screen playback
