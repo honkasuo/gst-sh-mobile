@@ -645,8 +645,15 @@ gst_shvideodec_decode (void *data)
 		       GST_BUFFER_SIZE(buffer)-used_bytes);
     }
 
+    if(!dec->running)
+    {
+      GST_DEBUG_OBJECT(dec,"We are done, calling finalize.");
+      shcodecs_decoder_finalize(dec->decoder);
+      GST_DEBUG_OBJECT(dec,"Stream finalized. Total decoded %d frames.",
+		       shcodecs_decoder_get_frame_count(dec->decoder));
+    }    
     gst_buffer_unref(buffer);
-    buffer = NULL;    
+    buffer = NULL;
   }while(dec->running);
 
   return NULL;
